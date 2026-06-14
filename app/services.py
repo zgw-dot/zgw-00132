@@ -544,16 +544,33 @@ def list_transport_batches(status=None):
     return query.order_by(TransportBatch.created_at.desc()).all()
 
 
+def resolve_batch_barrels(batch):
+    if batch.status != 'CANCELLED':
+        return list(batch.barrels)
+    history_records = StatusHistory.query.filter_by(
+        transport_batch_id=batch.id,
+        to_status='BATCHED'
+    ).distinct(StatusHistory.barrel_id).all()
+    barrel_ids = [h.barrel_id for h in history_records]
+    if not barrel_ids:
+        return []
+    barrels = HazardousWasteBarrel.query.filter(
+        HazardousWasteBarrel.id.in_(barrel_ids)
+    ).all()
+    return sorted(barrels, key=lambda b: b.id)
+
+
 def get_transport_batch(batch_id):
     return validate_batch_exists(batch_id)
 
 
 def get_batch_with_details(batch_id):
     batch = validate_batch_exists(batch_id)
+    barrels = resolve_batch_barrels(batch)
     return {
         'batch': batch,
-        'barrels': batch.barrels,
-        'barrel_count': len(batch.barrels)
+        'barrels': barrels,
+        'barrel_count': len(barrels)
     }
 
 
@@ -561,8 +578,9 @@ def export_all_batches():
     batches = TransportBatch.query.order_by(TransportBatch.created_at.desc()).all()
     result = []
     for batch in batches:
+        barrels = resolve_batch_barrels(batch)
         barrel_details = []
-        for b in batch.barrels:
+        for b in barrels:
             barrel_details.append({
                 'barrel_id': b.id,
                 'barrel_no': b.barrel_no,
@@ -581,7 +599,7 @@ def export_all_batches():
             'expected_exit_time': batch.expected_exit_time.isoformat() if batch.expected_exit_time else None,
             'manifest_no': batch.manifest_no,
             'total_weight_kg': batch.total_weight_kg,
-            'barrel_count': len(batch.barrels),
+            'barrel_count': len(barrels),
             'barrels': barrel_details,
             'status': batch.status,
             'cancel_reason': batch.cancel_reason,

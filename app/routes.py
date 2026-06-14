@@ -5,7 +5,7 @@ from flask import Blueprint, request, jsonify, Response
 from marshmallow import ValidationError
 
 from . import services
-from .services import BusinessError
+from .services import BusinessError, resolve_batch_barrels
 from .schemas import (
     HazardousWasteBarrelSchema,
     StatusHistorySchema,
@@ -236,7 +236,7 @@ def list_batches():
         result = []
         for b in batches:
             data = batch_schema.dump(b)
-            data['barrel_count'] = len(b.barrels)
+            data['barrel_count'] = len(resolve_batch_barrels(b))
             result.append(data)
         return jsonify(result)
     except BusinessError as e:
