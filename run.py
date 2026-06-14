@@ -24,23 +24,28 @@ def create_app():
     def index():
         return jsonify({
             'name': '危废暂存转移 API',
-            'version': '1.0.0',
+            'version': '1.1.0',
+            'features': ['危废桶全生命周期管理', '转运批次合批管理'],
             'endpoints': {
                 'health': '/health',
                 'api_root': '/api/v1',
                 'categories': '/api/v1/categories',
                 'locations': '/api/v1/locations',
                 'barrels': '/api/v1/barrels',
+                'batches': '/api/v1/batches',
                 'system_status': '/api/v1/status',
-                'export_json': '/api/v1/audit/export/json',
-                'export_csv': '/api/v1/audit/export/csv'
+                'audit_export_json': '/api/v1/audit/export/json',
+                'audit_export_csv': '/api/v1/audit/export/csv',
+                'batch_export_json': '/api/v1/batches/export/json',
+                'batch_export_csv': '/api/v1/batches/export/csv'
             },
-            'status_flow': 'CREATED → WEIGHED → REVIEWED → LOADED',
+            'status_flow': 'CREATED → WEIGHED → REVIEWED → BATCHED → LOADED',
+            'batch_status_flow': 'PENDING → COMPLETED (或 CANCELLED)',
             'roles': {
-                'WORKSHOP': '车间（创建）',
-                'WAREHOUSE': '仓管（称重入库）',
-                'ENV_AUDITOR': '环保复核员（复核）',
-                'TRANSPORT': '运输员（装车转移）'
+                'WORKSHOP': '车间（创建桶）',
+                'WAREHOUSE': '仓管（称重入库、撤销桶）',
+                'ENV_AUDITOR': '环保复核员（复核、撤销桶、取消批次）',
+                'TRANSPORT': '运输员（创建批次、取消批次、装车）'
             }
         })
 

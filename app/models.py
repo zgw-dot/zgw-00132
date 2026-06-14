@@ -7,7 +7,14 @@ BARREL_STATUS = [
     'CREATED',
     'WEIGHED',
     'REVIEWED',
+    'BATCHED',
     'LOADED',
+    'CANCELLED'
+]
+
+BATCH_STATUS = [
+    'PENDING',
+    'COMPLETED',
     'CANCELLED'
 ]
 
@@ -69,6 +76,7 @@ class HazardousWasteBarrel(db.Model):
     storage_location_code = db.Column(db.String(20))
     tag_code = db.Column(db.String(100), unique=True)
     manifest_no = db.Column(db.String(100))
+    transport_batch_id = db.Column(db.Integer, db.ForeignKey('transport_batches.id'))
     status = db.Column(db.String(20), default='CREATED', nullable=False)
     cancel_reason = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -76,6 +84,7 @@ class HazardousWasteBarrel(db.Model):
 
     waste_category = db.relationship('WasteCategory', backref='barrels')
     storage_location = db.relationship('StorageLocation', backref='barrels')
+    transport_batch = db.relationship('TransportBatch', backref='barrels')
     status_history = db.relationship('StatusHistory', backref='barrel', cascade='all, delete-orphan', order_by='StatusHistory.timestamp')
 
 
@@ -90,5 +99,31 @@ class StatusHistory(db.Model):
     operator_name = db.Column(db.String(100), nullable=False)
     weight_kg = db.Column(db.Float)
     manifest_no = db.Column(db.String(100))
+    transport_batch_id = db.Column(db.Integer, db.ForeignKey('transport_batches.id'))
     notes = db.Column(db.String(500))
     timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    transport_batch = db.relationship('TransportBatch', backref='status_histories')
+
+
+class TransportBatch(db.Model):
+    __tablename__ = 'transport_batches'
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_no = db.Column(db.String(50), unique=True, nullable=False)
+    vehicle_no = db.Column(db.String(50), nullable=False)
+    driver_name = db.Column(db.String(100), nullable=False)
+    driver_phone = db.Column(db.String(20))
+    expected_exit_time = db.Column(db.DateTime, nullable=False)
+    manifest_no = db.Column(db.String(100), nullable=False)
+    total_weight_kg = db.Column(db.Float, default=0.0)
+    status = db.Column(db.String(20), default='PENDING', nullable=False)
+    cancel_reason = db.Column(db.String(500))
+    cancelled_by_role = db.Column(db.String(20))
+    cancelled_by_name = db.Column(db.String(100))
+    cancelled_at = db.Column(db.DateTime)
+    created_by_role = db.Column(db.String(20), nullable=False)
+    created_by_name = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completed_at = db.Column(db.DateTime)

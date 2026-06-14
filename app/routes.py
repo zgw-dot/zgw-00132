@@ -15,7 +15,10 @@ from .schemas import (
     WeighBarrelSchema,
     ReviewBarrelSchema,
     LoadBarrelSchema,
-    CancelBarrelSchema
+    CancelBarrelSchema,
+    CreateTransportBatchSchema,
+    CancelTransportBatchSchema,
+    TransportBatchSchema
 )
 
 api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
@@ -25,6 +28,8 @@ barrels_schema = HazardousWasteBarrelSchema(many=True)
 category_schema = WasteCategorySchema(many=True)
 location_schema = StorageLocationSchema(many=True)
 history_schema = StatusHistorySchema(many=True)
+batch_schema = TransportBatchSchema()
+batches_schema = TransportBatchSchema(many=True, exclude=('barrels',))
 
 
 def json_error(message, code=400):
@@ -166,7 +171,7 @@ def export_audit_csv():
 
     header = [
         '桶号', '危废类别', '重量(kg)', '库位', '标签码', '联单号',
-        '当前状态', '撤销原因', '创建时间', '更新时间',
+        '转运批次号', '当前状态', '撤销原因', '创建时间', '更新时间',
         '状态变更历史'
     ]
     writer.writerow(header)
@@ -174,9 +179,10 @@ def export_audit_csv():
     for record in data:
         history_parts = []
         for h in record['status_history']:
+            batch_tag = f"[批次:{h['transport_batch_id']}]" if h.get('transport_batch_id') else ''
             history_parts.append(
                 f"{h['from_status'] or '-'}→{h['to_status']} "
-                f"({h['operator_role']}:{h['operator_name']}) "
+                f"({h['operator_role']}:{h['operator_name']}){batch_tag} "
                 f"[{h['timestamp']}]"
             )
         history_str = ' | '.join(history_parts)
@@ -188,6 +194,7 @@ def export_audit_csv():
             record['storage_location_code'] or '',
             record['tag_code'] or '',
             record['manifest_no'] or '',
+            record.get('transport_batch_no') or '',
             record['status'],
             record['cancel_reason'] or '',
             record['created_at'] or '',
@@ -206,12 +213,133 @@ def export_audit_csv():
     )
 
 
+@api_bp.route('/batches', methods=['POST'])
+def create_batch():
+    try:
+        data = CreateTransportBatchSchema().load(request.get_json())
+    except ValidationError as err:
+        return json_error(f"参数校验失败: {err.messages}")
+
+    try:
+        batch = services.create_transport_batch(data)
+        details = services.get_batch_with_details(batch.id)
+        return jsonify(batch_schema.dump(details['batch'])), 201
+    except BusinessError as e:
+        return json_error(e.message, e.code)
+
+
+@api_bp.route('/batches', methods=['GET'])
+def list_batches():
+    status = request.args.get('status')
+    try:
+        batches = services.list_transport_batches(status)
+        result = []
+        for b in batches:
+            data = batch_schema.dump(b)
+            data['barrel_count'] = len(b.barrels)
+            result.append(data)
+        return jsonify(result)
+    except BusinessError as e:
+        return json_error(e.message, e.code)
+
+
+@api_bp.route('/batches/<int:batch_id>', methods=['GET'])
+def get_batch(batch_id):
+    try:
+        details = services.get_batch_with_details(batch_id)
+        data = batch_schema.dump(details['batch'])
+        data['barrel_count'] = details['barrel_count']
+        data['barrels'] = barrels_schema.dump(details['barrels'])
+        return jsonify(data)
+    except BusinessError as e:
+        return json_error(e.message, e.code)
+
+
+@api_bp.route('/batches/<int:batch_id>/cancel', methods=['POST'])
+def cancel_batch(batch_id):
+    try:
+        data = CancelTransportBatchSchema().load(request.get_json())
+    except ValidationError as err:
+        return json_error(f"参数校验失败: {err.messages}")
+
+    try:
+        batch = services.cancel_transport_batch(batch_id, data)
+        details = services.get_batch_with_details(batch.id)
+        data = batch_schema.dump(details['batch'])
+        data['barrel_count'] = details['barrel_count']
+        data['barrels'] = barrels_schema.dump(details['barrels'])
+        return jsonify(data)
+    except BusinessError as e:
+        return json_error(e.message, e.code)
+
+
+@api_bp.route('/batches/export/json', methods=['GET'])
+def export_batches_json():
+    data = services.export_all_batches()
+    return jsonify({
+        'exported_at': datetime.utcnow().isoformat(),
+        'total_batches': len(data),
+        'batches': data
+    })
+
+
+@api_bp.route('/batches/export/csv', methods=['GET'])
+def export_batches_csv():
+    data = services.export_all_batches()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    header = [
+        '批次号', '车牌号', '司机姓名', '司机电话', '预计出厂时间',
+        '联单号', '总重量(kg)', '桶数量', '桶清单(桶号)', '当前状态',
+        '取消原因', '取消人角色', '取消人', '取消时间',
+        '创建人角色', '创建人', '创建时间', '完成时间'
+    ]
+    writer.writerow(header)
+
+    for batch in data:
+        barrel_nos = '; '.join(b['barrel_no'] for b in batch['barrels'])
+        row = [
+            batch['batch_no'],
+            batch['vehicle_no'],
+            batch['driver_name'],
+            batch['driver_phone'] or '',
+            batch['expected_exit_time'] or '',
+            batch['manifest_no'],
+            batch['total_weight_kg'],
+            batch['barrel_count'],
+            barrel_nos,
+            batch['status'],
+            batch['cancel_reason'] or '',
+            batch['cancelled_by_role'] or '',
+            batch['cancelled_by_name'] or '',
+            batch['cancelled_at'] or '',
+            batch['created_by_role'],
+            batch['created_by_name'],
+            batch['created_at'] or '',
+            batch['completed_at'] or ''
+        ]
+        writer.writerow(row)
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv; charset=utf-8-sig',
+        headers={
+            'Content-Disposition': f'attachment; filename=transport_batches_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.csv'
+        }
+    )
+
+
 @api_bp.route('/status', methods=['GET'])
 def get_system_status():
-    from .models import BARREL_STATUS, ROLES
+    from .models import BARREL_STATUS, ROLES, BATCH_STATUS
     return jsonify({
         'barrel_statuses': BARREL_STATUS,
+        'batch_statuses': BATCH_STATUS,
         'roles': ROLES,
         'status_transitions': services.STATUS_TRANSITIONS,
-        'role_permissions': services.ROLE_PERMISSIONS
+        'role_permissions': services.ROLE_PERMISSIONS,
+        'batch_cancel_roles': services.ALLOW_CANCEL_BATCH_ROLES
     })

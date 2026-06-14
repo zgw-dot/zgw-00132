@@ -168,6 +168,296 @@ curl http://localhost:5000/api/v1/audit/export/csv -o audit_export.csv
 
 ---
 
+## 转运批次完整验收链路（两个桶合批，curl 样例）
+
+### 前置准备: 创建并复核两个危废桶
+
+```bash
+# === 桶 A: HW12 类别，250.5kg ===
+# 车间创建
+curl -X POST http://localhost:5000/api/v1/barrels \
+  -H "Content-Type: application/json" \
+  -d '{
+    "barrel_no": "B-BATCH-DEMO-A",
+    "waste_category_id": 2,
+    "operator_role": "WORKSHOP",
+    "operator_name": "张工"
+  }'
+
+# 仓管称重入库（假设返回id=1）
+curl -X POST http://localhost:5000/api/v1/barrels/1/weigh \
+  -H "Content-Type: application/json" \
+  -d '{
+    "weight_kg": 250.5,
+    "storage_location_id": 2,
+    "tag_code": "TAG-BATCH-DEMO-A",
+    "operator_role": "WAREHOUSE",
+    "operator_name": "李仓管"
+  }'
+
+# 环保复核
+curl -X POST http://localhost:5000/api/v1/barrels/1/review \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operator_role": "ENV_AUDITOR",
+    "operator_name": "王复核",
+    "notes": "标识清晰，包装完好"
+  }'
+
+# === 桶 B: HW12 类别，180.3kg ===
+# 车间创建
+curl -X POST http://localhost:5000/api/v1/barrels \
+  -H "Content-Type: application/json" \
+  -d '{
+    "barrel_no": "B-BATCH-DEMO-B",
+    "waste_category_id": 2,
+    "operator_role": "WORKSHOP",
+    "operator_name": "张工"
+  }'
+
+# 仓管称重入库（假设返回id=2）
+curl -X POST http://localhost:5000/api/v1/barrels/2/weigh \
+  -H "Content-Type: application/json" \
+  -d '{
+    "weight_kg": 180.3,
+    "storage_location_id": 2,
+    "tag_code": "TAG-BATCH-DEMO-B",
+    "operator_role": "WAREHOUSE",
+    "operator_name": "李仓管"
+  }'
+
+# 环保复核
+curl -X POST http://localhost:5000/api/v1/barrels/2/review \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operator_role": "ENV_AUDITOR",
+    "operator_name": "王复核",
+    "notes": "标识清晰，包装完好"
+  }'
+```
+
+### 步骤1: 运输员创建转运批次（合批）
+
+> 批次总重量自动计算 = 250.5 + 180.3 = **430.8kg**
+
+```bash
+curl -X POST http://localhost:5000/api/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_no": "BATCH-DEMO-001",
+    "vehicle_no": "京A-DEMO01",
+    "driver_name": "赵司机",
+    "driver_phone": "13800138000",
+    "expected_exit_time": "2026-06-15T18:00:00",
+    "manifest_no": "HB-LD-DEMO-001",
+    "barrel_ids": [1, 2],
+    "operator_role": "TRANSPORT",
+    "operator_name": "赵司机"
+  }'
+```
+
+**响应说明**：返回批次详情，`total_weight_kg` 应为 430.8，批次内两个桶的状态均变为 `BATCHED`，此时 **库位容量不释放**（桶仍在库位，等待装车）。
+
+### 步骤2: 查询批次详情（验证桶清单）
+
+```bash
+# 假设返回批次 id=1
+curl http://localhost:5000/api/v1/batches/1
+```
+
+**响应**：包含 `barrel_count=2`，`barrels` 数组包含两个桶，总重量 430.8kg。
+
+### 步骤3: 装车（沿用现有装车流程，批次自动完成）
+
+```bash
+# 桶 1 装车，联单号必须与批次一致
+curl -X POST http://localhost:5000/api/v1/barrels/1/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "manifest_no": "HB-LD-DEMO-001",
+    "operator_role": "TRANSPORT",
+    "operator_name": "赵司机"
+  }'
+
+# 桶 2 装车
+curl -X POST http://localhost:5000/api/v1/barrels/2/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "manifest_no": "HB-LD-DEMO-001",
+    "operator_role": "TRANSPORT",
+    "operator_name": "赵司机"
+  }'
+```
+
+**效果**：
+- 桶状态变为 `LOADED`
+- 库位 STORE-B 容量释放（减少 430.8kg）
+- 批次状态自动变为 `COMPLETED`（所有桶都装车后）
+
+### 步骤4: 查询库位容量（验证释放）
+
+```bash
+curl http://localhost:5000/api/v1/locations
+```
+
+**验证**：STORE-B 的 `current_usage_kg` 应减少 430.8kg。
+
+### 步骤5: 审计追踪（验证批次关联）
+
+```bash
+# 查看桶 A 的审计历史
+curl http://localhost:5000/api/v1/barrels/1/audit
+```
+
+**验证**：`status_history` 中 BATCHED 和 LOADED 两条记录都带有 `transport_batch_id`，可追溯属于哪个批次。
+
+---
+
+## 转运批次: 取消流程 curl 样例
+
+### 前置: 创建一个待取消的批次
+
+```bash
+# 准备两个已复核桶（id=3, 4），过程略...
+
+# 创建批次
+curl -X POST http://localhost:5000/api/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_no": "BATCH-CANCEL-DEMO",
+    "vehicle_no": "京A-CANCEL",
+    "driver_name": "钱司机",
+    "expected_exit_time": "2026-06-15T19:00:00",
+    "manifest_no": "HB-CANCEL-DEMO",
+    "barrel_ids": [3, 4],
+    "operator_role": "TRANSPORT",
+    "operator_name": "钱司机"
+  }'
+```
+
+### 取消批次（环保复核员或运输员角色）
+
+```bash
+# 假设批次 id=2，使用环保复核员角色取消
+curl -X POST http://localhost:5000/api/v1/batches/2/cancel \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cancel_reason": "车辆临时故障，改期运输",
+    "operator_role": "ENV_AUDITOR",
+    "operator_name": "王复核"
+  }'
+```
+
+**取消效果**：
+1. 批次状态变为 `CANCELLED`，记录取消原因、取消人、取消时间
+2. 桶 3 和桶 4 的状态恢复为 `REVIEWED`
+3. 桶 3 和桶 4 的 `transport_batch_id` 清空（可重新合批）
+4. 库位容量 **不变**（取消批次不影响库位）
+5. 每个桶的状态历史中写入一条记录：`BATCHED → REVIEWED`，备注包含取消原因
+
+---
+
+## 转运批次: 非法路径测试（curl 样例，预期失败）
+
+### 1. 包含未复核桶(CREATED)的合批
+
+```bash
+curl -X POST http://localhost:5000/api/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_no": "BATCH-ERR-1",
+    "vehicle_no": "京A-ERR1",
+    "driver_name": "测试",
+    "expected_exit_time": "2026-06-15T20:00:00",
+    "manifest_no": "HB-ERR-1",
+    "barrel_ids": [1, 999],
+    "operator_role": "TRANSPORT",
+    "operator_name": "测试"
+  }'
+```
+
+**预期错误**：`不符合合批条件，只有已复核(REVIEWED)状态的桶才能合批`
+
+### 2. 同一桶同时进入两个未完成批次
+
+```bash
+# 先让桶成功加入一个批次（假设桶 id=5 状态为 REVIEWED）
+curl -X POST http://localhost:5000/api/v1/batches ... # 包含 [5]
+
+# 再尝试让它加入另一个批次
+curl -X POST http://localhost:5000/api/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_no": "BATCH-ERR-2",
+    ...,
+    "barrel_ids": [5, 6],
+    ...
+  }'
+```
+
+**预期错误**：`桶 xxx (状态: BATCHED) 不符合合批条件` 或 `已存在于未完成批次 xxx 中`
+
+### 3. 仓管角色越权创建批次
+
+```bash
+curl -X POST http://localhost:5000/api/v1/batches \
+  -H "Content-Type: application/json" \
+  -d '{
+    ...,
+    "operator_role": "WAREHOUSE",
+    "operator_name": "李仓管"
+  }'
+```
+
+**预期错误**：`角色 WAREHOUSE 无权执行 BATCHED 操作`
+
+### 4. 车间角色越权取消批次
+
+```bash
+curl -X POST http://localhost:5000/api/v1/batches/1/cancel \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cancel_reason": "测试越权",
+    "operator_role": "WORKSHOP",
+    "operator_name": "张工"
+  }'
+```
+
+**预期错误**：`角色 WORKSHOP 无权执行批次取消操作`
+
+---
+
+## 转运批次: 查询与导出接口
+
+```bash
+# 查询所有批次
+curl http://localhost:5000/api/v1/batches
+
+# 按状态筛选
+curl "http://localhost:5000/api/v1/batches?status=PENDING"
+curl "http://localhost:5000/api/v1/batches?status=COMPLETED"
+curl "http://localhost:5000/api/v1/batches?status=CANCELLED"
+
+# 查询批次详情（含桶清单）
+curl http://localhost:5000/api/v1/batches/1
+
+# === 批次导出 ===
+# JSON 格式
+curl http://localhost:5000/api/v1/batches/export/json
+
+# CSV 格式
+curl http://localhost:5000/api/v1/batches/export/csv -o batches_export.csv
+
+# === 审计导出（含批次信息）===
+# JSON: 每个桶记录包含 transport_batch_id, transport_batch_no 字段
+curl http://localhost:5000/api/v1/audit/export/json
+
+# CSV: 增加"转运批次号"列，状态历史中标注[批次:ID]
+curl http://localhost:5000/api/v1/audit/export/csv -o audit_with_batches.csv
+```
+
+---
+
 ## 撤销操作
 
 ```bash
