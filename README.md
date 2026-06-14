@@ -637,3 +637,76 @@ curl http://localhost:5000/api/v1/barrels/1/audit
 # 2. 另开终端执行：
 python test_api.py
 ```
+
+---
+
+## 已取消批次追溯问题验证
+
+### 问题描述
+批次一旦取消，批次详情和 JSON/CSV 导出会把原来的桶数量、桶清单清空，导致无法对账和追溯。
+
+### 根因
+取消批次时执行 `barrel.transport_batch_id = None` 清空外键，查询端通过 `batch.barrels` 外键关联实时取桶 → 取消后读为空。
+
+### 修复方案（最小改动）
+新增 `resolve_batch_barrels(batch)` 查询层函数：
+- 非 CANCELLED 状态：走原外键关联 `batch.barrels`
+- CANCELLED 状态：从 `status_history` 表中 `transport_batch_id = batch.id AND to_status = 'BATCHED'` 的记录追溯原始成员
+
+### 验证脚本
+
+`test_batch_cancel_robust.py` 是环境自洽的三阶段测试脚本，自动准备数据、避开冲突，不依赖会话残留。
+
+```bash
+# ========== 三阶段完整验证 ==========
+# 前置：启动服务
+python run.py
+
+# 阶段1：复现模式（临时注释修复代码时用，验证bug存在）
+# 预期：CANCELLED 后 barrel_count=0，桶ID=[]
+python test_batch_cancel_robust.py repro
+
+# 阶段2：修复验证模式（代码已修复时用）
+# 预期：CANCELLED 后仍保留完整数据，43项检查通过，自动保存快照
+python test_batch_cancel_robust.py verify
+
+# 阶段3：重启后一致性验证（重启服务后执行）
+# 预期：重启前后逐字段/逐字符一致，42项检查通过
+python test_batch_cancel_robust.py restart
+
+# ========== 预期结果 ==========
+# verify 模式：43/43 通过
+#   取消前(PENDING):   20/20
+#   取消后(CANCELLED): 23/23
+#   重新合批:          0/0  (verify 模式跳过，保持桶状态稳定)
+#
+# restart 模式：42/42 通过
+#   重启后独立验证: 19/19
+#   重启前后对比:   23/23
+```
+
+### 验证内容（逐项核对用户可见字段）
+
+| 接口 | 字段 | 取消前(PENDING) | 取消后(CANCELLED) | 重启后 |
+|------|------|----------------|------------------|--------|
+| 详情 GET /batches/{id} | barrel_count | 2 | 2 | 2 |
+| 详情 | barrels.id 列表 | [9,10] | [9,10] | [9,10] |
+| 详情 | barrels.barrel_no 列表 | [A,B] | [A,B] | [A,B] |
+| 详情 | status | PENDING | CANCELLED | CANCELLED |
+| 详情 | cancel_reason | None | 正确值 | 正确值 |
+| 详情 | total_weight_kg | 390.5 | 390.5 | 390.5 |
+| 列表 GET /batches | barrel_count | 2 | 2 | 2 |
+| JSON导出 /batches/export/json | barrel_count | 2 | 2 | 2 |
+| JSON导出 | barrels.id 列表 | [9,10] | [9,10] | [9,10] |
+| JSON导出 | barrels.barrel_no 列表 | [A,B] | [A,B] | [A,B] |
+| JSON导出 | status | PENDING | CANCELLED | CANCELLED |
+| JSON导出 | cancel_reason | None | 正确值 | 正确值 |
+| JSON导出 | total_weight_kg | 390.5 | 390.5 | 390.5 |
+| CSV导出 /batches/export/csv | 桶数量列(col8) | 2 | 2 | 2 |
+| CSV导出 | 状态列(col10) | PENDING | CANCELLED | CANCELLED |
+| CSV导出 | 取消原因列(col11) | 空 | 正确值 | 正确值 |
+| CSV导出 | 包含桶号 | ✓ | ✓ | ✓ |
+| 桶 GET /barrels/{id} | status | BATCHED | REVIEWED | REVIEWED |
+| 桶 | transport_batch_id | 非空 | None | None |
+| 其他 | 取消后可重新合批 | - | ✓ | - |
+
